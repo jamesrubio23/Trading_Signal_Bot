@@ -171,128 +171,249 @@ class TradingFunctions():
     ##########
 
 
+
+    ###################
+    ##SWING HIGH/LOW###
+    ###################
+
+    def swing_highs_lows(self, swing_length=10):
+        """
+        Swing Highs and Lows
+        A swing high is when the current high is the highest high out of the swing_length amount of candles before and after.
+        A swing low is when the current low is the lowest low out of the swing_length amount of candles before and after.
+
+        parameters:
+        swing_length: int - the amount of candles to look back and forward to determine the swing high or low
+
+        returns:
+        HighLow = 1 if swing high, -1 if swing low
+        Level = the level of the swing high or low
+        """
+        swing_length*=2
+
+        swing_highs_lows = np.where(
+            self.df['high']== self.df['high'].shift(-(swing_length//2)).rolling(swing_length).max(), 1,
+            np.where(self.df['low']==self.df['low'].shift(-(swing_length//2)).rolling(swing_length).min(), -1, np.nan),
+        )
+
+        while True:
+            positions = np.where(~np.isnan(swing_highs_lows))[0]
+
+            if len(positions) < 2:
+                break  
+
+            current = swing_highs_lows[positions[:-1]]
+            next = swing_highs_lows[positions[1:]]
+
+            highs = self.df['high'].iloc[positions[:-1]].values
+            lows = self.df['low'].iloc[positions[:-1]].values
+
+            next_highs = self.df['high'].iloc[positions[1:]].values
+            next_lows = self.df['low'].iloc[positions[1:]].values
+
+            print(f"We have next_highs: {next_highs}")
+            print(f"We have next_lows: {next_highs}")
+
+            index_to_remove = np.zeros(len(positions), dtype=bool)
+
+            consecutive_highs = (current == 1) & (next == 1)
+            index_to_remove[:-1] |= consecutive_highs & (highs < next_highs)
+            index_to_remove[1:] |= consecutive_highs & (highs >= next_highs)
+
+            consecutive_lows = (current == -1) & (next == -1)
+            index_to_remove[:-1] |= consecutive_lows & (lows > next_lows)
+            index_to_remove[1:] |= consecutive_lows & (lows <= next_lows)
+
+
+            if not index_to_remove.any():
+                break
+
+            swing_highs_lows[positions[index_to_remove]] = np.nan
+
+        positions = np.where(~np.isnan(swing_highs_lows))[0]
+
+        print(f"Positions: {positions}")
+
+        if len(positions) > 0:
+            if swing_highs_lows[positions[0]] == 1:
+                swing_highs_lows[0] = -1
+            if swing_highs_lows[positions[0]] == -1:
+                swing_highs_lows[0] = 1
+            if swing_highs_lows[positions[-1]] == -1:
+                swing_highs_lows[-1] = 1
+            if swing_highs_lows[positions[-1]] == 1:
+                swing_highs_lows[-1] = -1
+
+        self.df["HighLow"] = swing_highs_lows
+        self.df["Level"] = np.where(
+            ~np.isnan(swing_highs_lows),
+            np.where(swing_highs_lows == 1, highs, lows),
+            np.nan,
+        )
+
+
+
+
+
+
+
     #################
     ###BoS y Choch###
     #################
 
-
-    def isPivot(self, candle, window):
+    def bos_choch(self, swing_highs_lows, close_break = True):
         """
-        function that detects if a candle is a pivot/fractal point
-        args: candle index, window before and after candle to test if pivot
-        returns: 1 if pivot high, 2 if pivot low, 3 if both and 0 default
+        BOS - Break of Structure
+        CHoCH - Change of Character
+        these are both indications of market structure changing
 
-        Candle = 'Close'
-        window=5
-        df['isPivot'] = df.apply(lambda x: isPivot(x.name,window), axis=1)
-        """
-        if candle-window < 0 or candle+window >= len(self.df):
-            return 0
-        
-        pivotHigh = 1
-        pivotLow = 2
-        for i in range(candle-window, candle+window+1):
-            if self.df.iloc[candle].low > self.df.iloc[i].low:
-                pivotLow=0
-            if self.df.iloc[candle].high < self.df.iloc[i].high:
-                pivotHigh=0
-        if (pivotHigh and pivotLow):
-            return 3
-        elif pivotHigh:
-            return pivotHigh
-        elif pivotLow:
-            return pivotLow
-        else:
-            return 0
+        parameters:
+        swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function
+        close_break: bool - if True then the break of structure will be mitigated based on the close of the candle otherwise it will be the high/low.
 
-    def pointpos(self, x):
-        """
-        Function that returns the price position of the pivot point
-        df['pointpos'] = df.apply(lambda row: pointpos(row), axis=1)
+        returns:
+        BOS = 1 if bullish break of structure, -1 if bearish break of structure
+        CHOCH = 1 if bullish change of character, -1 if bearish change of character
+        Level = the level of the break of structure or change of character
+        BrokenIndex = the index of the candle that broke the level
         """
 
-        if x['isPivot']==2:
-            return x['low']-1e-3
-        elif x['isPivot']==1:
-            return x['high']+1e-3
-        else:
-            return np.nan
+        swing_highs_lows = swing_highs_lows.copy()
+
+        level_order = []
+        highs_lows_order = []
+
+        bos = np.zeros(len(self.df), dtype=np.int32)
+        choch = np.zeros(len(self.df), dtype=np.int32)
+        level = np.zeros(len(self.df), dtype=np.float32)
+
+        last_positions = []
+
+        for i in range(len(swing_highs_lows["HighLow"])):
+            if not np.isnan(swing_highs_lows["HighLow"][i]):
+                level_order.append(swing_highs_lows["Level"][i])
+                highs_lows_order.append(swing_highs_lows["HighLow"][i])
+                if len(level_order) >= 4:
+                    # bullish bos
+                    bos[last_positions[-2]] = (
+                        1
+                        if (
+                            np.all(highs_lows_order[-4:] == [-1, 1, -1, 1])
+                            and np.all(
+                                level_order[-4]
+                                < level_order[-2]
+                                < level_order[-3]
+                                < level_order[-1]
+                            )
+                        )
+                        else 0
+                    )
+                    level[last_positions[-2]] = (
+                        level_order[-3] if bos[last_positions[-2]] != 0 else 0
+                    )
+
+                    # bearish bos
+                    bos[last_positions[-2]] = (
+                        -1
+                        if (
+                            np.all(highs_lows_order[-4:] == [1, -1, 1, -1])
+                            and np.all(
+                                level_order[-4]
+                                > level_order[-2]
+                                > level_order[-3]
+                                > level_order[-1]
+                            )
+                        )
+                        else bos[last_positions[-2]]
+                    )
+                    level[last_positions[-2]] = (
+                        level_order[-3] if bos[last_positions[-2]] != 0 else 0
+                    )
+
+                    # bullish choch
+                    choch[last_positions[-2]] = (
+                        1
+                        if (
+                            np.all(highs_lows_order[-4:] == [-1, 1, -1, 1])
+                            and np.all(
+                                level_order[-1]
+                                > level_order[-3]
+                                > level_order[-4]
+                                > level_order[-2]
+                            )
+                        )
+                        else 0
+                    )
+                    level[last_positions[-2]] = (
+                        level_order[-3]
+                        if choch[last_positions[-2]] != 0
+                        else level[last_positions[-2]]
+                    )
+
+                    # bearish choch
+                    choch[last_positions[-2]] = (
+                        -1
+                        if (
+                            np.all(highs_lows_order[-4:] == [1, -1, 1, -1])
+                            and np.all(
+                                level_order[-1]
+                                < level_order[-3]
+                                < level_order[-4]
+                                < level_order[-2]
+                            )
+                        )
+                        else choch[last_positions[-2]]
+                    )
+                    level[last_positions[-2]] = (
+                        level_order[-3]
+                        if choch[last_positions[-2]] != 0
+                        else level[last_positions[-2]]
+                    )
+
+                last_positions.append(i)
+
+        broken = np.zeros(len(self.df), dtype=np.int32)
+        for i in np.where(np.logical_or(bos != 0, choch != 0))[0]:
+            mask = np.zeros(len(self.df), dtype=np.bool_)
+            # if the bos is 1 then check if the candles high has gone above the level
+            if bos[i] == 1 or choch[i] == 1:
+                mask = self.df["close" if close_break else "high"][i + 2 :] > level[i]
+            # if the bos is -1 then check if the candles low has gone below the level
+            elif bos[i] == -1 or choch[i] == -1:
+                mask = self.df["close" if close_break else "low"][i + 2 :] < level[i]
+            if np.any(mask):
+                j = np.argmax(mask) + i + 2
+                broken[i] = j
+                # if there are any unbroken bos or choch that started before this one and ended after this one then remove them
+                for k in np.where(np.logical_or(bos != 0, choch != 0))[0]:
+                    if k < i and broken[k] >= j:
+                        bos[k] = 0
+                        choch[k] = 0
+                        level[k] = 0
+
+        # remove the ones that aren't broken
+        for i in np.where(
+            np.logical_and(np.logical_or(bos != 0, choch != 0), broken == 0)
+        )[0]:
+            bos[i] = 0
+            choch[i] = 0
+            level[i] = 0
+
+        # replace all the 0s with np.nan
+        bos = np.where(bos != 0, bos, np.nan)
+        choch = np.where(choch != 0, choch, np.nan)
+        level = np.where(level != 0, level, np.nan)
+        broken = np.where(broken != 0, broken, np.nan)
+
+        bos = pd.Series(bos, name="BOS")
+        choch = pd.Series(choch, name="CHOCH")
+        level = pd.Series(level, name="Level")
+        broken = pd.Series(broken, name="BrokenIndex")
+
+        return pd.concat([bos, choch, level, broken], axis=1)
+
+
     
-    def detect_structure(self, candle, backcandles, window):
-        """
-        Attention! window should always be greater than the pivot window! to avoid look ahead bias
-        """
-        localdf = self.df[candle-backcandles-window:candle-window]  
-        highs = localdf[localdf['isPivot'] == 1].high.tail(3).values
-        idxhighs = localdf[localdf['isPivot'] == 1].high.tail(3).index
-        lows = localdf[localdf['isPivot'] == 2].low.tail(3).values
-        idxlows = localdf[localdf['isPivot'] == 2].low.tail(3).index
-
-        pattern_detected = False
-
-        lim1 = 0.005
-        lim2 = lim1/3
-        if len(highs) == 3 and len(lows) == 3:
-            order_condition = (idxlows[0] < idxhighs[0] 
-                            < idxlows[1] < idxhighs[1] 
-                            < idxlows[2] < idxhighs[2])
-            diff_condition = ( 
-                                abs(lows[0]-highs[0])>lim1 and 
-                                abs(highs[0]-lows[1])>lim2 and
-                                abs(highs[1]-lows[1])>lim1 and
-                                abs(highs[1]-lows[2])>lim2
-                                )
-            pattern_1 = (lows[0] < highs[0] and ## Alcista
-                lows[1] > lows[0] and lows[1] < highs[0] and
-                highs[1] > highs[0] and
-                lows[2] > lows[1] and lows[2] < highs[1] and
-                highs[2] < highs[1] and highs[2] > lows[2]
-                )
-
-            pattern_2 = (lows[0] < highs[0] and
-                lows[1] > lows[0] and lows[1] < highs[0] and
-                highs[1] > highs[0] and
-                lows[2] < lows[1] and
-                highs[2] < highs[1] 
-                )
-
-            if (order_condition and
-                diff_condition and
-                (pattern_1 or pattern_2)
-            ):
-                pattern_detected = True
-
-        if pattern_detected:
-            return 1
-        else:
-            return 0
-    
-
-    def apply_indicators(self, window=5):
-        """
-        Function that applies all the indicators to the dataframe
-        """
-        self.df['isPivot'] = self.df.apply(lambda x: self.isPivot(x.name, window), axis=1)
-        self.df['pointpos'] = self.df.apply(lambda x: self.pointpos(x), axis=1)
-        self.df['structure'] = self.df.apply(lambda x: self.detect_structure(x.name, backcandles=100, window=window), axis=1)
-        return self.df
-    
-
-    def plot_structure(self, backcandles=600, window=5):
-        localdf = self.df[-backcandles-window:]
-        plt.figure(figsize=(12,6))
-        plt.plot(localdf['Close'], label='Close Price', color='blue')
-        plt.scatter(localdf.index, localdf['pointpos'], color='red', label='Pivots', marker='o')
-        plt.title('Price with Pivot Points')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
-        plt.legend()
-        plt.grid()
-        plt.show()
-
-
-    def detect_bos(self, n1=20, n2=5):
-        self.df = self.indicators.EMA()
 
 
 
